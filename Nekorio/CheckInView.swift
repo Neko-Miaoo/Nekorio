@@ -137,12 +137,30 @@ private struct CheckInSwipeRow: View {
     let open: () -> Void
     let requestDeletion: () -> Void
 
-    @GestureState private var drag: CGFloat = 0
+    private enum SwipeDrag {
+        case idle
+        case vertical
+        case horizontal(startWidth: CGFloat, translation: CGFloat)
+    }
+
+    private static let settleAnimation = Animation.spring(response: 0.32, dampingFraction: 0.82)
+    @GestureState(resetTransaction: Transaction(animation: CheckInSwipeRow.settleAnimation))
+    private var drag: SwipeDrag = .idle
     private let actionWidth: CGFloat = 76
 
     private var isRevealed: Bool { revealedProjectID == project.id }
     private var revealWidth: CGFloat {
-        min(actionWidth, max(0, (isRevealed ? actionWidth : 0) - drag))
+        let settledWidth = isRevealed ? actionWidth : 0
+        guard case .horizontal(let startWidth, let translation) = drag else { return settledWidth }
+        let width = max(0, startWidth - translation)
+        let overshoot = max(0, width - actionWidth)
+        let elasticLimit: CGFloat = 32
+        return min(width, actionWidth) + elasticLimit * overshoot / (elasticLimit + overshoot)
+    }
+
+    private var canTapDelete: Bool {
+        guard case .idle = drag else { return false }
+        return isRevealed
     }
 
     var body: some View {
@@ -171,7 +189,7 @@ private struct CheckInSwipeRow: View {
             .buttonStyle(.plain)
             .frame(width: revealWidth, alignment: .trailing)
             .clipped()
-            .allowsHitTesting(isRevealed && drag == 0)
+            .allowsHitTesting(canTapDelete)
             .accessibilityHidden(!isRevealed)
         }
         .background(.red)
@@ -180,20 +198,42 @@ private struct CheckInSwipeRow: View {
     }
 
     private var cardGesture: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .updating($drag) { value, state, _ in
-                if abs(value.translation.width) > abs(value.translation.height) {
-                    state = value.translation.width
+                let delta = value.translation
+                switch state {
+                case .idle:
+                    if abs(delta.width) > abs(delta.height) {
+                        state = .horizontal(startWidth: isRevealed ? actionWidth : 0, translation: delta.width)
+                    } else {
+                        state = .vertical
+                    }
+                case .horizontal(let startWidth, _):
+                    state = .horizontal(startWidth: startWidth, translation: delta.width)
+                case .vertical:
+                    break
                 }
             }
             .exclusively(before: TapGesture())
             .onEnded { gesture in
                 switch gesture {
                 case .first(let value):
-                    let delta = value.translation
-                    guard abs(delta.width) > abs(delta.height) else { return }
-                    let distance = (isRevealed ? actionWidth : 0) - delta.width
-                    setRevealed(distance > actionWidth / 2)
+                    let startWidth: CGFloat
+                    switch drag {
+                    case .horizontal(let width, _):
+                        startWidth = width
+                    case .vertical:
+                        return
+                    case .idle:
+                        let delta = value.translation
+                        guard abs(delta.width) > abs(delta.height) else { return }
+                        startWidth = isRevealed ? actionWidth : 0
+                    }
+                    let distance = startWidth - value.predictedEndTranslation.width
+                    let shouldReveal = distance > actionWidth / 2
+                    if shouldReveal != isRevealed {
+                        setRevealed(shouldReveal)
+                    }
                 case .second:
                     activateCard()
                 }
@@ -209,7 +249,7 @@ private struct CheckInSwipeRow: View {
     }
 
     private func setRevealed(_ revealed: Bool) {
-        withAnimation(.easeOut(duration: 0.2)) {
+        withAnimation(Self.settleAnimation) {
             revealedProjectID = revealed ? project.id : nil
         }
     }
